@@ -37,25 +37,16 @@ impl Node<(), Payload> for UniqueNode {
         input: Message<Payload>,
         output: &mut std::io::StdoutLock,
     ) -> anyhow::Result<()> {
-        if let Payload::Generate {} = input.body.payload {
-            let node_id = &self.node_id;
-            let reply = Message {
-                src: input.dst,
-                dst: input.src,
-                body: Body {
-                    id: None,
-                    in_reply_to: input.body.id,
-                    payload: Payload::GenerateOk {
-                        id: format!(
-                            "{}-{}-{}",
-                            node_id,
-                            self.id,
-                            time::OffsetDateTime::now_utc().unix_timestamp().to_string(),
-                        ),
-                    },
-                },
+        let mut reply = input.into_reply(Some(&mut self.id));
+        if let Payload::Generate {} = reply.body.payload {
+            reply.body.payload = Payload::GenerateOk {
+                id: format!(
+                    "{}-{}-{}",
+                    &self.node_id,
+                    self.id,
+                    time::OffsetDateTime::now_utc().unix_timestamp().to_string()
+                ),
             };
-            self.id += 1;
             serde_json::to_writer(&mut *output, &reply).context("fail to write init_ok")?;
             output
                 .write_all(b"\n")

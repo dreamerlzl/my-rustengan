@@ -12,11 +12,31 @@ pub struct Message<Payload> {
     pub body: Body<Payload>,
 }
 
+impl<Payload> Message<Payload> {
+    pub fn into_reply(self, id: Option<&mut usize>) -> Self {
+        Message {
+            src: self.dst,
+            dst: self.src,
+            body: Body {
+                id: id.map(|id| {
+                    let mid = *id;
+                    *id += 1;
+                    mid
+                }),
+                in_reply_to: self.body.id,
+                payload: self.body.payload,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Body<Payload> {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "msg_id")]
     pub id: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<usize>,
 
     #[serde(flatten)]
