@@ -1,6 +1,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Context;
+use crossbeam::channel::{unbounded, Sender};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -66,20 +67,24 @@ pub trait Node<S, Payload> {
     fn step(
         &mut self,
         input: Message<Payload>,
-        output: &mut std::io::StdoutLock,
+        tx: &Sender<Message<Payload>>,
+        // output: &mut std::io::StdoutLock,
     ) -> anyhow::Result<()>;
 }
 
 pub fn main_loop<InitState, Payload, N>(init_state: InitState) -> anyhow::Result<()>
 where
     N: Node<InitState, Payload>,
-    Payload: DeserializeOwned,
+    Payload: DeserializeOwned + Send + 'static + Serialize,
 {
-    let mut stdin = std::io::stdin().lock().lines();
-    let mut stdout = std::io::stdout().lock();
-    let input =
-        serde_json::from_str::<Message<InitPayload>>(&stdin.next().expect("no init msg found")?)
-            .context("fail to deserialize init")?;
+    let stdin = std::io::stdin();
+    let mut stdin_lines = stdin.lock().lines();
+    let stdout = std::io::stdout();
+    let mut stdout_lock = stdout.lock();
+    let input = serde_json::from_str::<Message<InitPayload>>(
+        &stdin_lines.next().expect("no init msg found")?,
+    )
+    .context("fail to deserialize init")?;
     let InitPayload::Init(init) =
         input.body.payload else {
                 return Err(anyhow::anyhow!("the must msg type should be init"));
@@ -95,14 +100,37 @@ where
             payload: InitPayload::InitOk {},
         },
     };
-    serde_json::to_writer(&mut stdout, &reply).context("fail to write init_ok")?;
-    stdout.write_all(b"\n").context("fail to flush init_ok")?;
+    send(&mut stdout_lock, &reply)?;
+    drop(stdout_lock);
 
-    for line in stdin {
+    let (tx, rx) = unbounded();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut stdout_lock = stdout.lock();
+        for msg in rx {
+            send(&mut stdout_lock, &msg)?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    // this will iterate until all senders are dropped
+    for line in stdin_lines {
         let line = line?;
         let input: Message<Payload> =
             serde_json::from_str(&line).context("fail to deserialize step payload")?;
-        state.step(input, &mut stdout).context("step failed")?;
+        state.step(input, &tx).context("step failed")?;
     }
+    stdout_handle
+        .join()
+        .expect("fail to join stdout handle")
+        .context("stdout handle exit with an error")?;
+    Ok(())
+}
+
+fn send<T>(mut output: &mut std::io::StdoutLock, msg: &T) -> anyhow::Result<()>
+where
+    T: Sized + Serialize,
+{
+    serde_json::to_writer(&mut output, msg).context("fail to write init_ok")?;
+    output.write_all(b"\n").context("fail to flush init_ok")?;
     Ok(())
 }

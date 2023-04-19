@@ -1,6 +1,4 @@
-use std::io::Write;
-
-use anyhow::Context;
+use crossbeam::channel::Sender;
 use my_rustengan::*;
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +33,7 @@ impl Node<(), Payload> for UniqueNode {
     fn step(
         &mut self,
         input: Message<Payload>,
-        output: &mut std::io::StdoutLock,
+        tx: &Sender<Message<Payload>>,
     ) -> anyhow::Result<()> {
         let mut reply = input.into_reply(Some(&mut self.id));
         if let Payload::Generate {} = reply.body.payload {
@@ -47,10 +45,7 @@ impl Node<(), Payload> for UniqueNode {
                     time::OffsetDateTime::now_utc().unix_timestamp().to_string()
                 ),
             };
-            serde_json::to_writer(&mut *output, &reply).context("fail to write init_ok")?;
-            output
-                .write_all(b"\n")
-                .context("fail to flush GenerateOk")?;
+            tx.send(reply)?;
         }
         Ok(())
     }

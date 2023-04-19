@@ -1,6 +1,4 @@
-use std::io::Write;
-
-use anyhow::Context;
+use crossbeam::channel::Sender;
 use my_rustengan::*;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +22,7 @@ impl Node<(), Payload> for EchoNode {
     fn step(
         &mut self,
         input: Message<Payload>,
-        output: &mut std::io::StdoutLock,
+        tx: &Sender<Message<Payload>>,
     ) -> anyhow::Result<()> {
         if let Payload::Echo { echo } = input.body.payload {
             let reply = Message {
@@ -37,8 +35,7 @@ impl Node<(), Payload> for EchoNode {
                 },
             };
             self.id += 1;
-            serde_json::to_writer(&mut *output, &reply).context("fail to write output")?;
-            output.write_all(b"\n").context("fail to flush echo_ok")?;
+            tx.send(reply)?;
         }
 
         Ok(())
