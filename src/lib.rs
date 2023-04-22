@@ -61,24 +61,33 @@ pub struct Init {
 #[derive(Serialize)]
 struct InitOk;
 
-pub trait Node<S, Payload> {
-    fn from_init(init_state: S, init: Init) -> Self;
+#[derive(Debug)]
+pub enum Event<Payload, InjectedPayload = ()> {
+    Message(Message<Payload>),
+    Injected(InjectedPayload),
+}
+
+pub trait Node<S, Payload, InjectedPayload = ()> {
+    fn from_init(init_state: S, init: Init, tx: Sender<Event<Payload, InjectedPayload>>) -> Self;
 
     fn step(
         &mut self,
-        input: Message<Payload>,
+        input: Event<Payload, InjectedPayload>,
         tx: &Sender<Message<Payload>>,
         // output: &mut std::io::StdoutLock,
     ) -> anyhow::Result<()>;
 }
 
-pub fn main_loop<InitState, Payload, N>(init_state: InitState) -> anyhow::Result<()>
+pub fn main_loop<InitState, Payload, InjectedPayload, N>(
+    init_state: InitState,
+) -> anyhow::Result<()>
 where
-    N: Node<InitState, Payload>,
+    N: Node<InitState, Payload, InjectedPayload>,
     Payload: DeserializeOwned + Send + 'static + Serialize,
+    InjectedPayload: Send + 'static,
 {
-    let stdin = std::io::stdin();
-    let mut stdin_lines = stdin.lock().lines();
+    let stdin_lock = std::io::stdin().lock();
+    let mut stdin_lines = stdin_lock.lines();
     let stdout = std::io::stdout();
     let mut stdout_lock = stdout.lock();
     let input = serde_json::from_str::<Message<InitPayload>>(
@@ -90,7 +99,8 @@ where
                 return Err(anyhow::anyhow!("the must msg type should be init"));
             };
 
-    let mut state = N::from_init(init_state, init);
+    let (stdin_tx, stdin_rx) = unbounded();
+    let mut state = N::from_init(init_state, init, stdin_tx.clone());
     let reply = Message {
         src: input.dst,
         dst: input.src,
@@ -103,22 +113,33 @@ where
     send(&mut stdout_lock, &reply)?;
     drop(stdout_lock);
 
-    let (tx, rx) = unbounded();
+    // hides the details about output
+    let (stdout_tx, stdout_rx) = unbounded();
     let stdout_handle = std::thread::spawn(move || {
         let mut stdout_lock = stdout.lock();
-        for msg in rx {
+        for msg in stdout_rx {
             send(&mut stdout_lock, &msg)?;
         }
         Ok::<_, anyhow::Error>(())
     });
 
-    // this will iterate until all senders are dropped
-    for line in stdin_lines {
-        let line = line?;
-        let input: Message<Payload> =
-            serde_json::from_str(&line).context("fail to deserialize step payload")?;
-        state.step(input, &tx).context("step failed")?;
+    drop(stdin_lines);
+
+    std::thread::spawn(move || {
+        let stdin_lines = std::io::stdin().lock().lines();
+        for line in stdin_lines {
+            let line = line?;
+            let input: Message<Payload> =
+                serde_json::from_str(&line).context("fail to deserialize step payload")?;
+            let _ = stdin_tx.send(Event::Message(input));
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+
+    for event in stdin_rx {
+        state.step(event, &stdout_tx).context("step failed")?;
     }
+
     stdout_handle
         .join()
         .expect("fail to join stdout handle")

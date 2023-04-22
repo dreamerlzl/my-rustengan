@@ -23,18 +23,17 @@ struct UniqueNode {
 }
 
 impl Node<(), Payload> for UniqueNode {
-    fn from_init(_: (), init: Init) -> Self {
+    fn from_init(_: (), init: Init, _: Sender<Event<Payload>>) -> Self {
         UniqueNode {
             id: 1,
             node_id: init.node_id,
         }
     }
 
-    fn step(
-        &mut self,
-        input: Message<Payload>,
-        tx: &Sender<Message<Payload>>,
-    ) -> anyhow::Result<()> {
+    fn step(&mut self, event: Event<Payload>, tx: &Sender<Message<Payload>>) -> anyhow::Result<()> {
+        let Event::Message(input) =event else {
+            panic!("unexpected injected payload")
+        };
         let mut reply = input.into_reply(Some(&mut self.id));
         if let Payload::Generate {} = reply.body.payload {
             reply.body.payload = Payload::GenerateOk {
@@ -52,5 +51,5 @@ impl Node<(), Payload> for UniqueNode {
 }
 
 fn main() -> anyhow::Result<()> {
-    main_loop::<_, _, UniqueNode>(())
+    main_loop::<_, _, _, UniqueNode>(())
 }
