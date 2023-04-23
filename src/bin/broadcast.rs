@@ -5,7 +5,7 @@ use std::{
 
 use crossbeam::channel::Sender;
 use my_rustengan::*;
-use rand::seq::SliceRandom;
+use rand::{seq::SliceRandom, Rng};
 use serde::{Deserialize, Serialize};
 
 const PUSH_PERIOD: u64 = 100;
@@ -38,7 +38,7 @@ enum Payload {
     },
     TopologyOk,
     GossipPush {
-        seen: HashSet<MessageID>,
+        to_push: HashSet<MessageID>,
     },
     GossipPull,
 }
@@ -74,43 +74,50 @@ impl Node<(), Payload, InjectedGossip> for BroadcastNode {
         tx: &Sender<Message<Payload>>,
     ) -> anyhow::Result<()> {
         match event {
-            Event::Injected(injected) => match injected {
-                InjectedGossip::Gossip => {
-                    if let Some(random_neighbor) = self.neighbors.choose(&mut rand::thread_rng()) {
-                        // push
-                        let seen: HashSet<MessageID> = self
-                            .messages
-                            .iter()
-                            .filter(|m| !self.knows[random_neighbor].contains(m))
-                            .copied()
-                            .collect();
-                        if !seen.is_empty() {
+            Event::Injected(injected) => {
+                match injected {
+                    InjectedGossip::Gossip => {
+                        let rng = &mut rand::thread_rng();
+                        if let Some(random_neighbor) = self.neighbors.choose(rng) {
+                            // push
+                            let (already_known, mut to_push): (HashSet<MessageID>, HashSet<_>) =
+                                self.messages
+                                    .iter()
+                                    .copied()
+                                    .partition(|m| self.knows[random_neighbor].contains(m));
+                            let denominator = already_known.len() as u32;
+                            let nominator = (0.1 * to_push.len() as f64) as u32;
+                            to_push.extend(already_known.into_iter().filter(|_| {
+                                rng.gen_ratio(nominator.min(denominator), denominator)
+                            }));
+                            eprintln!("to_push/total : {}/{}", to_push.len(), self.messages.len());
+
                             let reply = Message {
                                 src: self.node_id.clone(),
                                 dst: random_neighbor.clone(),
                                 body: Body {
                                     id: None,
                                     in_reply_to: None,
-                                    payload: Payload::GossipPush { seen },
+                                    payload: Payload::GossipPush { to_push },
+                                },
+                            };
+                            tx.send(reply)?;
+
+                            // pull
+                            let reply = Message {
+                                src: self.node_id.clone(),
+                                dst: random_neighbor.clone(),
+                                body: Body {
+                                    id: None,
+                                    in_reply_to: None,
+                                    payload: Payload::GossipPull,
                                 },
                             };
                             tx.send(reply)?;
                         }
-
-                        // pull
-                        let reply = Message {
-                            src: self.node_id.clone(),
-                            dst: random_neighbor.clone(),
-                            body: Body {
-                                id: None,
-                                in_reply_to: None,
-                                payload: Payload::GossipPull,
-                            },
-                        };
-                        tx.send(reply)?;
                     }
                 }
-            },
+            }
             Event::Message(input) => {
                 let mut reply = input.into_reply(Some(&mut self.id));
                 let payload = match reply.body.payload {
@@ -124,9 +131,9 @@ impl Node<(), Payload, InjectedGossip> for BroadcastNode {
                         if seen.is_empty() {
                             return Ok(());
                         }
-                        Payload::GossipPush { seen }
+                        Payload::GossipPush { to_push: seen }
                     }
-                    Payload::GossipPush { seen } => {
+                    Payload::GossipPush { to_push: seen } => {
                         self.messages.extend(seen.clone());
                         self.knows
                             .entry(reply.dst.clone())
